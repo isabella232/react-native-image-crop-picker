@@ -33,6 +33,8 @@ import com.facebook.react.modules.core.PermissionAwareActivity;
 import com.facebook.react.modules.core.PermissionListener;
 import com.yalantis.ucrop.UCrop;
 import com.yalantis.ucrop.UCropActivity;
+import com.esafirm.imagepicker.features.ImagePicker;
+import com.esafirm.imagepicker.model.Image;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -50,6 +52,7 @@ import java.util.concurrent.Callable;
 class PickerModule extends ReactContextBaseJavaModule implements ActivityEventListener {
 
     private static final int IMAGE_PICKER_REQUEST = 61110;
+    private static final int NATIVE_IMAGE_PICKER_REQUEST = 61112;
     private static final int CAMERA_PICKER_REQUEST = 61111;
     private static final String E_ACTIVITY_DOES_NOT_EXIST = "E_ACTIVITY_DOES_NOT_EXIST";
 
@@ -67,6 +70,7 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
 
     private String mediaType = "any";
     private boolean multiple = false;
+    private int maxFiles = ImagePicker.MAX_LIMIT;
     private boolean includeBase64 = false;
     private boolean includeExif = false;
     private boolean cropping = false;
@@ -118,6 +122,7 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     private void setConfiguration(final ReadableMap options) {
         mediaType = options.hasKey("mediaType") ? options.getString("mediaType") : mediaType;
         multiple = options.hasKey("multiple") && options.getBoolean("multiple");
+        maxFiles = options.hasKey("maxFiles") ? options.getInt("maxFiles") : maxFiles;
         includeBase64 = options.hasKey("includeBase64") && options.getBoolean("includeBase64");
         includeExif = options.hasKey("includeExif") && options.getBoolean("includeExif");
         width = options.hasKey("width") ? options.getInt("width") : width;
@@ -322,25 +327,13 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
 
     private void initiatePicker(final Activity activity) {
         try {
-            final Intent galleryIntent = new Intent(Intent.ACTION_PICK);
-
-            if (cropping || mediaType.equals("photo")) {
-                galleryIntent.setType("image/*");
-            } else if (mediaType.equals("video")) {
-                galleryIntent.setType("video/*");
-            } else {
-                galleryIntent.setType("*/*");
-                String[] mimetypes = {"image/*", "video/*"};
-                galleryIntent.putExtra(Intent.EXTRA_MIME_TYPES, mimetypes);
+            ImagePicker picker = ImagePicker.create(activity);
+            if (multiple) {
+              picker.multi();
             }
-
-            galleryIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            galleryIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
-            galleryIntent.setAction(Intent.ACTION_GET_CONTENT);
-            galleryIntent.putExtra(Intent.EXTRA_LOCAL_ONLY, true);
-
-            final Intent chooserIntent = Intent.createChooser(galleryIntent, "Pick an image");
-            activity.startActivityForResult(chooserIntent, IMAGE_PICKER_REQUEST);
+            picker.limit(maxFiles);
+            picker.showCamera(false);
+            picker.start(NATIVE_IMAGE_PICKER_REQUEST);
         } catch (Exception e) {
             resultCollector.notifyProblem(E_FAILED_TO_SHOW_PICKER, e);
         }
@@ -437,6 +430,22 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
 
     private void getAsyncSelection(final Activity activity, Uri uri, boolean isCamera) throws Exception {
         String path = resolveRealPath(activity, uri, isCamera);
+        if (path == null || path.isEmpty()) {
+            resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, "Cannot resolve asset path.");
+            return;
+        }
+
+        String mime = getMimeType(path);
+        if (mime != null && mime.startsWith("video/")) {
+            getVideo(activity, path, mime);
+            return;
+        }
+
+        resultCollector.notifySuccess(getImage(activity, path));
+    }
+
+    private void getAsyncSelection(final Activity activity, Image image) throws Exception {
+        String path = image.getPath();
         if (path == null || path.isEmpty()) {
             resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, "Cannot resolve asset path.");
             return;
@@ -621,6 +630,51 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
                 .start(activity);
     }
 
+    private void nativeImagePickerResult(Activity activity, final int requestCode, final int resultCode, final Intent data) {
+        if (resultCode == Activity.RESULT_CANCELED) {
+            resultCollector.notifyProblem(E_PICKER_CANCELLED_KEY, E_PICKER_CANCELLED_MSG);
+        } else if (resultCode == Activity.RESULT_OK) {
+            if (multiple) {
+                ArrayList<Image> images = (ArrayList<Image>) ImagePicker.getImages(data);
+                try {
+                    // only one image selected
+                    if (images.size() == 0) {
+                        resultCollector.setWaitCount(1);
+                        getAsyncSelection(activity, images.get(0));
+                    } else {
+                        resultCollector.setWaitCount(images.size());
+                        for (int i = 0; i < images.size(); i++) {
+                            getAsyncSelection(activity, images.get(i));
+                        }
+                    }
+                } catch (Exception ex) {
+                    resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, ex.getMessage());
+                }
+
+            } else {
+                Uri uri = data.getData();
+                ArrayList<Image> images = (ArrayList<Image>) ImagePicker.getImages(data);
+
+                if (uri == null) {
+                    resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, "Cannot resolve image url");
+                    return;
+                }
+
+                //TODO fix this logic
+                if (cropping) {
+                    startCropping(activity, uri);
+                } else {
+                    try {
+                        getAsyncSelection(activity, images.get(0));
+                    } catch (Exception ex) {
+                        resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, ex.getMessage());
+                    }
+                }
+            }
+        }
+
+    }
+
     private void imagePickerResult(Activity activity, final int requestCode, final int resultCode, final Intent data) {
         if (resultCode == Activity.RESULT_CANCELED) {
             resultCollector.notifyProblem(E_PICKER_CANCELLED_KEY, E_PICKER_CANCELLED_MSG);
@@ -715,6 +769,8 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     public void onActivityResult(Activity activity, final int requestCode, final int resultCode, final Intent data) {
         if (requestCode == IMAGE_PICKER_REQUEST) {
             imagePickerResult(activity, requestCode, resultCode, data);
+        } else if(requestCode == NATIVE_IMAGE_PICKER_REQUEST){
+            nativeImagePickerResult(activity, requestCode, resultCode, data);
         } else if (requestCode == CAMERA_PICKER_REQUEST) {
             cameraPickerResult(activity, requestCode, resultCode, data);
         } else if (requestCode == UCrop.REQUEST_CROP) {
