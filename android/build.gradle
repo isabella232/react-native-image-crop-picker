@@ -18,5 +18,5 @@ dependencies {
     compile 'com.facebook.react:react-native:+'
     compile 'com.github.yalantis:ucrop:2.2.1-native'
     compile 'id.zelory:compressor:2.1.0'
-    compile 'com.github.esafirm.android-image-picker:imagepicker:1.9.0'
+    compile 'com.github.thoughtbot.android-image-picker:imagepicker:black_overlay-SNAPSHOT'
 }
